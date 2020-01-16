@@ -1,0 +1,24 @@
+,,,,
+,,,,
+,,,,
+,,,,
+,,,,
+,,,,
+,,,,
+,,,,
+,"An alpha code that indicates major groupings of institutions based on insuring agent, entity type, charter agent, Federal Reserve membership status and country.
+
+Note:  The BKCLASS value represents the institution’s class as of the survey date. 
+  
+N  = NATIONAL MEMBER BANKS
+SM = STATE MEMBER BANKS
+NM = STATE NONMEMBER BANKS
+SI = STOCK AND MUTUAL SAVINGS BANKS
+SB = SAVINGS BANKS AND SAVINGS AND LOANS
+SL = STATE STOCK SAVINGS AND LOANS                                                                                                                                                         SA = As of July 21, 2011, FDIC supervised state chartered thrifts and OCC supervised federally chartered thrifts. Prior to that date, state or federally chartered savings associations supervised by the Office of Thrift Supervision (OTS). 
+OI = OTHER INSURED INSTITUTIONS
+NC = NONINSURED INSTITUTIONS
+NS = NONINSURED SAVINGS INSTITUTIONS AND INSURANCE CO.
+CU = CREDIT UNIONS
+",,,
+,,,,

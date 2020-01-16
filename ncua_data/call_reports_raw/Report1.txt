@@ -1,0 +1,89 @@
+
+
+                            5300 Call Report Quarterly Data Reports
+
+
+         The 5300 Call Report Quarterly Data Reports for Cycle Date 6/30/2019 contains the details
+         in each file as shown below:
+
+
+                3,335  FCU's        Federally chartered, federally insured CU	
+				   
+                1,973  FISCU's      State chartered, federally insured CU
+                                       
+                  117  NFICU's      State chartered, not federally insured CU
+                                   
+
+                5,425               Total Credit Union Count
+
+
+
+         Total Records in each of the eleven Data files listed below:
+
+              File Name             Data Records             Title Record (Header)*
+
+
+              FOICU.txt                  5,425              	+ 1
+
+              FS220.txt                  5,425             	+ 1
+
+              FS220A.txt                 5,425             	+ 1
+
+              FS220B.txt                 5,425             	+ 1
+
+              FS220C.txt                 5,425     	        + 1
+              
+              FS220D.txt                 5,425                  + 1
+              
+              FS220G.txt                 5,425   	        + 1 
+
+              FS220H.txt                 5,425     	        + 1  
+
+              FS220I.txt		 5,425                  + 1   
+    		
+              FS220J.txt		 5,425                  + 1 
+
+              FS220K.txt		 5,425                  + 1  
+              
+              FS220L.txt                 5,425                  + 1
+              
+              FS220M.txt                 5,425                  + 1 
+
+              FS220N.txt                 5,425                  + 1                
+
+              Credit Union Branch        21,940                 + 1
+	      Information.txt                             	      
+
+              ATM Locations.txt         16,287             	+ 1
+	      
+              Grants.txt                 4,149                	+ 1
+
+              TradeNames.txt              622                   + 1
+
+
+
+         Account Description Files
+
+              AcctDesc.txt               Contains description of the data accounts.
+
+	      Acct-DescGrants.txt        Contains description of accounts in Grants.txt file.
+
+              Acct-DescTradeNames.txt    Contains description of accounts in TradeNames.txt file
+
+              FOICUDES.txt               Contains description of accounts in FOICU.txt file.
+
+         Information Files
+
+              Report1.txt                This is the document you are seeing right now.
+
+              Readme.txt                 This document provides info about 5300 Call Report Quarterly Data Reports files.
+
+
+
+         The data in the text file (.txt) is in text-delimited format.
+
+         It has been seperated by commas (,) and double quotes (" ").
+
+
+
+         * One title record (first record) for each file.

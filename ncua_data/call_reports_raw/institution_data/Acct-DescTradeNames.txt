@@ -1,0 +1,7 @@
+"Field Name","Type","Size","Description"
+"CU_NUMBER","int",5.00,"The credit union charter number."
+"CycleDate","smalldatetime",4.00,"Stores the Cycle date for snapshot profile."
+"JoinNumber","int",4.00,"Unique Identifier representing individual Credit Union"
+"CU_NAME","varchar",35.00,"The name of the credit union"
+"TradeNamesId","int",4.00,"A Unique Identifier Representing individual TradeName Record"
+"TradeName","varchar",256.00,"Stores the name of trade."
