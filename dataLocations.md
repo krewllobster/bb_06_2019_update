@@ -32,6 +32,9 @@
       - [Field locations](#field-locations)
       - [Import `foicu.txt`](#import-foicutxt)
       - [Import `fs220` and `fs220D`](#import-fs220-and-fs220d)
+    - [Import NCUA Branches](#import-ncua-branches)
+    - [Calculate NCUA Branch Statistics (NCUA)](#calculate-ncua-branch-statistics-ncua)
+      - [Calculate Distance to Centroid (NCUA)](#calculate-distance-to-centroid-ncua)
     - [Matching CDFI Banks & Credit Unions](#matching-cdfi-banks--credit-unions)
       - [Original process in older collection](#original-process-in-older-collection)
       - [As part of a data-update, follow the instructions in the CDFI_data folder](#as-part-of-a-data-update-follow-the-instructions-in-the-cdfidata-folder)
@@ -339,41 +342,12 @@ db.fdic_branches.find().forEach((x, i) => {
 
 #### Calculate centroid location
 
+We'll use the [average geolocation helper function](./helper_functions/averageGeolocation.js) to calculate the centroid of all branches:
+
 ```javascript
 // define this averageGeolocation function in the mongo termiinal
-function averageGeolocation(coords) {
-  if (coords.length === 1) {
-    return coords[0];
-  }
+const averageGeolocation = require('./helper_functions/averageGeolocation.js');
 
-  let x = 0.0;
-  let y = 0.0;
-  let z = 0.0;
-
-  for (let coord of coords) {
-    let latitude = (coord.latitude * Math.PI) / 180;
-    let longitude = (coord.longitude * Math.PI) / 180;
-
-    x += Math.cos(latitude) * Math.cos(longitude);
-    y += Math.cos(latitude) * Math.sin(longitude);
-    z += Math.sin(latitude);
-  }
-
-  let total = coords.length;
-
-  x = x / total;
-  y = y / total;
-  z = z / total;
-
-  let centralLongitude = Math.atan2(y, x);
-  let centralSquareRoot = Math.sqrt(x * x + y * y);
-  let centralLatitude = Math.atan2(z, centralSquareRoot);
-
-  return {
-    latitude: (centralLatitude * 180) / Math.PI,
-    longitude: (centralLongitude * 180) / Math.PI
-  };
-}
 //group all branch locations by rssd and calculate the centroid
 db.fdic_branches
   .aggregate([
@@ -419,36 +393,8 @@ db.fdic_branches
 The following is the haversine formula to find the distance between two points. We use this on each `fdic_branch` document to calculate the distance in meters between the branch location and the centroid location. This will eventually be used to calculate the Branch Density score.
 
 ```javascript
-// haversine formula
-const asin = Math.asin;
-const cos = Math.cos;
-const sin = Math.sin;
-const sqrt = Math.sqrt;
-const PI = Math.PI;
-
-// equatorial mean radius of Earth (in meters)
-const R = 6378137;
-
-function squared(x) {
-  return x * x;
-}
-function toRad(x) {
-  return (x * PI) / 180.0;
-}
-function hav(x) {
-  return squared(sin(x / 2));
-}
-
-// hav(theta) = hav(bLat - aLat) + cos(aLat) * cos(bLat) * hav(bLon - aLon)
-function haversineDistance(a, b) {
-  const aLat = toRad(a.latitude || a.lat);
-  const bLat = toRad(b.latitude || b.lat);
-  const aLng = toRad(a.longitude || a.lng || a.lon);
-  const bLng = toRad(b.longitude || b.lng || b.lon);
-
-  const ht = hav(bLat - aLat) + cos(aLat) * cos(bLat) * hav(bLng - aLng);
-  return 2 * R * asin(sqrt(ht));
-}
+// define haversine formula in mongo terminal
+const haversineDistance = require('./helper_functions/haversineDistance.js');
 ```
 
 Now we iterate through all the fdic_branches, calculate the distance to the centroid and write it back to the branch as 'distanceToCentroid'.
@@ -607,6 +553,169 @@ Create index on rssd and CU_NUMBER field:
 ```javascript
 db.ncua_all_reports.createIndex({ rssd: 1 });
 db.ncua_all_reports.createIndex({ CU_NUMBER: 1 });
+```
+
+### Import NCUA Branches
+
+The file `ncua_data/call_reports_raw/branch_data/Credit Union Branch Information.txt` contains address information about each credit union branch. We need to convert this .txt file to a .csv file and then upload it to geocod.io for processing. We use the physical address for geocoding.
+
+First import to mongo:
+
+```bash
+mongoimport -d bb2020 -c ncua_branches --headerline --type=csv --file="Credit Union Branch Information.txt"
+```
+
+Then bring rssd down from ncua_all_reports:
+
+```javascript
+db.ncua_branches.aggregate([
+  {
+    $lookup: {
+      from: 'ncua_all_reports',
+      localField: 'CU_NUMBER',
+      foreignField: 'CU_NUMBER',
+      as: 'hq'
+    }
+  },
+  {
+    $unwind: '$hq'
+  },
+  {
+    $addFields: {
+      rssd: '$hq.RSSD'
+    }
+  },
+  {
+    $project: {
+      hq: 0
+    }
+  },
+  {
+    $out: 'ncua_branches'
+  }
+]);
+```
+
+Confirm that all the branches received an rssd (i.e. have a parent institution)
+
+```javascript
+db.ncua_branches.find({ rssd: { $exists: true } }).count();
+// should equal
+db.ncua_branches.count();
+```
+
+Then create an index on rssd:
+
+```javascript
+db.ncua_branches.createIndex({ rssd: 1 });
+```
+
+Now we can export this collection as a csv. In the `ncua_data/geocoding` folder run:
+
+```bash
+mongoexport -d bb2020 -c ncua_branches --fields rssd,CU_NUMBER,SiteId,CU_NAME,SiteName,SiteTypeName,MainOffice,PhysicalAddressLine1,PhysicalAddressLine2,PhysicalAddressCity,PhysicalAddressStateCode,PhysicalAddressPostalCode,PhysicalAddressCountyName,PhysicalAddressCountry --type=csv --out ncua_branches_for_geocoding.csv
+```
+
+Then submit to geocod.io for geocoding of addresses into latitude longitude. Then we'll essentially repeat the above steps.
+
+Once you receive the file back, merge back into `ncua_branches` collection in mongo using SiteId as key:
+
+```bash
+mongoimport -d bb2020 -c ncua_branches --fieldFile="fieldfile.txt"  --columnsHaveTypes --type=csv  --file="geoCode_response.csv" --mode merge --upsertFields=SiteId
+```
+
+Now add the location field:
+
+```javascript
+db.ncua_branches.aggregate([
+  {
+    $addFields: {
+      location: {
+        type: 'Point',
+        coordinates: ['$Longitude', '$Latitude']
+      }
+    }
+  },
+  {
+    $out: 'ncua_branches'
+  }
+]);
+```
+
+### Calculate NCUA Branch Statistics (NCUA)
+
+We'll use the [average geolocation helper function](./helper_functions/averageGeolocation.js) to calculate the centroid of all branches:
+
+```javascript
+// define this averageGeolocation function in the mongo termiinal
+const averageGeolocation = require('./helper_functions/averageGeolocation.js');
+
+//group all branch locations by rssd and calculate the centroid
+db.ncua_branches
+  .aggregate([
+    {
+      $group: {
+        _id: {
+          rssd: '$rssd'
+        },
+        branchIds: {
+          $push: '$_id'
+        },
+        coords: {
+          $push: {
+            latitude: '$SIMS_LATITUDE',
+            longitude: '$SIMS_LONGITUDE'
+          }
+        }
+      }
+    }
+  ])
+  .forEach(({ _id: rssd, branchIds, coords }) => {
+    // for each set of branch ids, find the avg. location and write it back to all
+    // of the branches as a new location
+    const { latitude, longitude } = averageGeolocation(coords);
+    branchIds.forEach(id => {
+      db.fdic_branches.findOneAndUpdate(
+        { _id: id },
+        {
+          $set: {
+            centroidLocation: {
+              type: 'Point',
+              coordinates: [longitude, latitude]
+            }
+          }
+        }
+      );
+    });
+  });
+```
+
+#### Calculate Distance to Centroid (NCUA)
+
+The following is the haversine formula to find the distance between two points. We use this on each `fdic_branch` document to calculate the distance in meters between the branch location and the centroid location. This will eventually be used to calculate the Branch Density score.
+
+```javascript
+// define haversine formula in mongo terminal
+const haversineDistance = require('./helper_functions/haversineDistance.js');
+```
+
+Now we iterate through all the fdic_branches, calculate the distance to the centroid and write it back to the branch as 'distanceToCentroid'.
+
+```javascript
+db.fdic_branches.find().forEach((x, i) => {
+  const branchCoords = {
+    latitude: x.location.coordinates[1],
+    longitude: x.location.coordinates[0]
+  };
+  const centroidCoords = {
+    latitude: x.centroidLocation.coordinates[1],
+    longitude: x.centroidLocation.coordinates[0]
+  };
+
+  const distToCentroid = haversineDistance(branchCoords, centroidCoords);
+  x.distanceToCentroid = distToCentroid;
+  db.fdic_branches.save(x);
+});
 ```
 
 ### Matching CDFI Banks & Credit Unions
