@@ -35,9 +35,19 @@
     - [Import NCUA Branches](#import-ncua-branches)
     - [Calculate NCUA Branch Statistics (NCUA)](#calculate-ncua-branch-statistics-ncua)
       - [Calculate Distance to Centroid (NCUA)](#calculate-distance-to-centroid-ncua)
-    - [Matching CDFI Banks & Credit Unions](#matching-cdfi-banks--credit-unions)
-      - [Original process in older collection](#original-process-in-older-collection)
-      - [As part of a data-update, follow the instructions in the CDFI_data folder](#as-part-of-a-data-update-follow-the-instructions-in-the-cdfidata-folder)
+      - [Create 2d sphere index on NCUA branches](#create-2d-sphere-index-on-ncua-branches)
+    - [Seting QCT Status for branches](#seting-qct-status-for-branches)
+    - [SPM Query](#spm-query)
+      - [NCUA SPM Base](#ncua-spm-base)
+      - [FDIC SPM Base](#fdic-spm-base)
+      - [Combine FDIC & NCUA SPM_BASE INTO ALL INSTITUTIONS](#combine-fdic--ncua-spmbase-into-all-institutions)
+      - [Add score data](#add-score-data)
+      - [Matching CDFI Banks & Credit Unions](#matching-cdfi-banks--credit-unions)
+      - [Adding FDIC Minority Depository Institution Flag](#adding-fdic-minority-depository-institution-flag)
+      - [STATUS](#status)
+    - [Combining Branches into All_Branches Collection](#combining-branches-into-allbranches-collection)
+      - [Convert FDIC & NCUA Branches into identical structure](#convert-fdic--ncua-branches-into-identical-structure)
+    - [Add Zip Code Data to New DB](#add-zip-code-data-to-new-db)
 
 ## Updates
 
@@ -604,10 +614,11 @@ db.ncua_branches.find({ rssd: { $exists: true } }).count();
 db.ncua_branches.count();
 ```
 
-Then create an index on rssd:
+Then create an index on rssd and a joint unique index on rssd & SiteId:
 
 ```javascript
 db.ncua_branches.createIndex({ rssd: 1 });
+db.ncua_branches.createIndex({ rssd: 1, SiteId: 1 }, { unique: true });
 ```
 
 Now we can export this collection as a csv. In the `ncua_data/geocoding` folder run:
@@ -621,7 +632,15 @@ Then submit to geocod.io for geocoding of addresses into latitude longitude. The
 Once you receive the file back, merge back into `ncua_branches` collection in mongo using SiteId as key:
 
 ```bash
-mongoimport -d bb2020 -c ncua_branches --fieldFile="fieldfile.txt"  --columnsHaveTypes --type=csv  --file="geoCode_response.csv" --mode merge --upsertFields=SiteId
+mongoimport -d bb2020 -c ncua_branches --fieldFile="fieldfile.txt"  --columnsHaveTypes --type=csv  --file="geoCode_response.csv" --mode merge --upsertFields=rssd,SiteId
+```
+
+**hint**: If something is being weird, you may have a document in ncua_branches that is the headerline as the above command uses a field file. Just find and delete that one.
+
+Then delete any that were not geolocated (4 in 6/30 update for example):
+
+```javascript
+db.ncua_branches.deleteMany({ Longitude: { $eq: 0 } });
 ```
 
 Now add the location field:
@@ -663,19 +682,17 @@ db.ncua_branches
         },
         coords: {
           $push: {
-            latitude: '$SIMS_LATITUDE',
-            longitude: '$SIMS_LONGITUDE'
+            latitude: '$Latitude',
+            longitude: '$Longitude'
           }
         }
       }
     }
   ])
   .forEach(({ _id: rssd, branchIds, coords }) => {
-    // for each set of branch ids, find the avg. location and write it back to all
-    // of the branches as a new location
     const { latitude, longitude } = averageGeolocation(coords);
     branchIds.forEach(id => {
-      db.fdic_branches.findOneAndUpdate(
+      db.ncua_branches.findOneAndUpdate(
         { _id: id },
         {
           $set: {
@@ -702,7 +719,7 @@ const haversineDistance = require('./helper_functions/haversineDistance.js');
 Now we iterate through all the fdic_branches, calculate the distance to the centroid and write it back to the branch as 'distanceToCentroid'.
 
 ```javascript
-db.fdic_branches.find().forEach((x, i) => {
+db.ncua_branches.find().forEach((x, i) => {
   const branchCoords = {
     latitude: x.location.coordinates[1],
     longitude: x.location.coordinates[0]
@@ -714,56 +731,733 @@ db.fdic_branches.find().forEach((x, i) => {
 
   const distToCentroid = haversineDistance(branchCoords, centroidCoords);
   x.distanceToCentroid = distToCentroid;
+  db.ncua_branches.save(x);
+});
+```
+
+#### Create 2d sphere index on NCUA branches
+
+```javascript
+db.ncua_branches.createIndex({ location: '2dsphere' });
+```
+
+### Seting QCT Status for branches
+
+We are using the `qct_geo` collection found in our older database `bb`
+
+```javascript
+const otherDb = db.getSiblingDB('bb');
+db.ncua_branches.find().forEach((x, i) => {
+  const { location } = x;
+  const tract = otherDb.qct_geo.findOne(
+    {
+      geometry: {
+        $geoIntersects: {
+          $geometry: location
+        }
+      }
+    },
+    { geometry: 0 }
+  );
+  const isQct = tract ? tract.properties.qct : null;
+  x.qct = isQct;
+  db.ncua_branches.save(x);
+  if (i % 100 === 0) {
+    print(i, ' complete');
+  }
+});
+
+db.fdic_branches.find().forEach((x, i) => {
+  const { location } = x;
+  const tract = otherDb.qct_geo.findOne(
+    {
+      geometry: {
+        $geoIntersects: {
+          $geometry: location
+        }
+      }
+    },
+    { geometry: 0 }
+  );
+  const isQct = tract ? tract.properties.qct : null;
+  x.qct = isQct;
   db.fdic_branches.save(x);
 });
 ```
 
-### Matching CDFI Banks & Credit Unions
+### SPM Query
 
-#### Original process in older collection
+#### NCUA SPM Base
 
-Create institution collection
+Create NCUA institutions collection
 
 ```javascript
-db.fdic_all_reports.find().forEach(x => {
-  const newDoc = {
-    name: x.name,
-    city: x.city,
-    state: x.stalp,
-    zip: x.zip,
-    address: x.address,
-    rssd: x.fed_rssd,
-    regulator: 'fdic',
-    type: 'bank',
-    website: x.webaddr
-  };
-  db.all_institutions.save(newDoc);
-});
-
-db.ncua_all_reports.find().forEach(x => {
-  const newDoc = {
-    name: x.CU_NAME,
-    city: x.CITY,
-    state: x.STATE,
-    zip: x.ZIP_CODE,
-    address: x.STREET,
-    rssd: x.RSSD,
-    regulator: 'ncua',
-    type: x.creditUnionType,
-    website: x.Acct_891
-  };
-  db.all_institutions.save(newDoc);
-});
+db.ncua_all_reports.aggregate([
+  {
+    $project: {
+      rssd: 1,
+      cu_number: '$CU_NUMBER',
+      regulator: 'ncua',
+      bankInformation: {
+        city: '$CITY',
+        state: '$STATE',
+        zip: '$ZIP_CODE',
+        name: '$CU_NAME',
+        streetAddress: '$STREET',
+        creditUnionType: '$creditUnionType',
+        year_opened: '$ISSUE_DATE',
+        website: '$Acct_891'
+      },
+      meta: {
+        reportDate: '$CYCLE_DATE',
+        collection: 'ncua_all_reports',
+        originId: '$_id'
+      },
+      coreStatistics: {
+        totalAssets: {
+          $divide: [
+            '$ACCT_010',
+            1000
+          ]
+        },
+        totalAssetsThousands: {
+          $divide: ['$ACCT_010', 1000]
+        },
+        totalAssetsDollars: '$ACCT_010',
+        totalAssetsBillions: {
+          $divide: ['$ACCT_010', 1000000000]
+        },
+        totalLoans: {
+          $divide: [
+            '$ACCT_025B',
+            1000
+          ]
+        },
+        totalDeposits: {
+          $divide: [
+            '$ACCT_018',
+            1000
+          ]
+        },
+        housingLending: {
+          $divide: [
+            '$ACCT_703',
+            1000
+          ]
+        },
+        smallBizLending: {
+          $divide: [
+            '$ACCT_387',
+            1000
+          ]
+        },
+        farmLending: {
+          $divide: [
+            '$ACCT_042',
+            1000
+          ]
+        }
+      },
+      flags: {
+        mcu: {
+          $cond: {
+            if: {
+              $eq: ['$MemberMinorityStatus', 1]
+            },
+            then: true,
+            else: false
+          }
+        },
+        licu: {
+          $cond: {
+            if: {
+              $eq: ['$LIMITED_INC', 1]
+            },
+            then: true,
+            else: false
+          }
+        }
+      }
+    }
+  },
+  {
+    $lookup: {
+      from: 'ncua_branches',
+      let: {
+        inst_rssd: '$rssd'
+      },
+      pipeline: [
+        {
+          $match: {
+            $expr: {
+              $eq: ['$rssd', '$$inst_rssd']
+            }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            countQct: {
+              $sum: {
+                $cond: {
+                  if: {
+                    $eq: ['$qct', true]
+                  },
+                  then: 1,
+                  else: 0
+                }
+              }
+            },
+            countTotal: {
+              $sum: 1
+            },
+            avgDistToCenter: {
+              $avg: '$distanceToCentroid'
+            }
+          }
+        },
+        {
+          $project: {
+            _id: 0
+          }
+        }
+      ],
+      as: 'branchStatistics'
+    }
+  },
+  {
+    $unwind: '$branchStatistics'
+  },
+  {
+    $out: 'ncua_institutions_06_2019'
+  }
+]);
 ```
 
-Next, create an exports folder under your root directory and navigate there in terminal and export the collection we just created:
+#### FDIC SPM Base
+
+Create FDIC institutions collection.
+
+__NOTE!!!__ NCUA publishes actual dollar values for fields like total assets, total loans, etc. FDIC publishes those same values in thousands of dollars. In this query, we are converting all values that NCUA has as actual into thousands.
+
+```javascript
+db.fdic_all_reports.aggregate([
+  {
+    $project: {
+      rssd: '$fed_rssd',
+      cert: '$cert',
+      regulator: 'fdic',
+      bankInformation: {
+        city: '$city',
+        state: '$state',
+        zip: '$zip',
+        name: '$name',
+        streetAddress: '$address',
+        year_opened: '$estymd',
+        website: '$webaddr'
+      },
+      meta: {
+        reportDate: '$repdte',
+        collection: 'fdic_all_reports',
+        originId: '$_id'
+      },
+      coreStatistics: {
+        totalAssets: '$asset',
+        totalAssetsThousands: '$asset',
+        totalAssetsDollars: {
+          $multiply: ['$asset', 1000]
+        },
+        totalAssetsBillions: {
+          $divide: ['$asset', 1000000]
+        },
+        totalLoans: '$lnlsnet',
+        totalDeposits: '$depdom',
+        housingLending: '$lnreres',
+        smallBizLending: {
+          $sum: ['$Lnrenr4', '$Lnci4']
+        },
+        farmLending: {
+          $sum: ['Lnreag4', 'Lnag4']
+        }
+      },
+      flags: {
+        mutual: {
+          $cond: {
+            if: {
+              $eq: ['$mutual', 1]
+            },
+            then: true,
+            else: false
+          }
+        },
+        communityBank: {
+          $cond: {
+            if: {
+              $eq: ['$cb', 1]
+            },
+            then: true,
+            else: false
+          }
+        }
+      }
+    }
+  },
+  {
+    $lookup: {
+      from: 'fdic_branches',
+      let: {
+        inst_rssd: '$rssd'
+      },
+      pipeline: [
+        {
+          $match: {
+            $expr: {
+              $eq: ['$rssd', '$$inst_rssd']
+            }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            countQct: {
+              $sum: {
+                $cond: {
+                  if: {
+                    $eq: ['$qct', true]
+                  },
+                  then: 1,
+                  else: 0
+                }
+              }
+            },
+            countTotal: {
+              $sum: 1
+            },
+            avgDistToCenter: {
+              $avg: '$distanceToCentroid'
+            }
+          }
+        },
+        {
+          $project: {
+            _id: 0
+          }
+        }
+      ],
+      as: 'branchStatistics'
+    }
+  },
+  {
+    $unwind: '$branchStatistics'
+  },
+  {
+    $out: 'fdic_institutions_06_2019'
+  }
+]);
+```
+
+#### Adding FDIC Minority Depository Institution Flag
+
+List of MDIs is found [on the FDIC website](https://www.fdic.gov/regulations/resources/minority/mdi.html)
+
+June 2019 data found in [MDI_data](./MDI_data)
+
+Load in the cert numbers as FDIC_MDI_06_2019 collection:
 
 ```bash
-mongoexport --db=bb2020 --collection=all_institutions --type=csv --fields=name,city,state,zip,address,regulator,type,website,rssd  --out=all_institutions_for_cdfi.csv
+mongoimport -d bb2020 -c fdic_mdi_06_2019 --file=fdic_mdi_certs.csv --headerline --type=csv
 ```
 
-Matching CDFI fund data gives us the files in the CDFI_data folder.
+Now run the following aggregation to look for FDIC institutions, then lookup if the cert matches an MDI. If so, then it is an MDI, otherwise not.
 
-#### As part of a data-update, follow the instructions in the CDFI_data folder
+```javascript
+db.fdic_institutions_06_2019.aggregate([
+  {
+    $lookup: {
+      from: 'fdic_mdi_06_2019',
+      localField: 'cert',
+      foreignField: 'cert',
+      as: 'mdi_list'
+    }
+  },
+  {
+    $addFields: {
+      'flags.mdi': {
+        $cond: {
+          if: {
+            $gt: [{ $size: '$mdi_list' }, 0]
+          },
+          then: true,
+          else: false
+        }
+      }
+    }
+  },
+  {
+    $project: {
+      mdi_list: 0
+    }
+  },
+  {
+    $out: 'fdic_institutions_06_2019'
+  }
+]);
+```
 
-[Instructions here](CDFI_data/mergeCommands.md)
+#### Matching CDFI Banks & Credit Unions
+
+Create a collection using [all_cdfis.csv](./CDFI_data/all_cdfis.csv) from the CDFI_data folder
+
+```bash
+mongoimport -d bb2020 -c all_cdfis --file=all_cdfis.csv --type=csv --headerline
+```
+
+Ensure rssd is indexed in both collections:
+
+```javascript
+db.all_institutions_spm_06_2019.ensureIndex({ rssd: 1 });
+db.all_cdfis.ensureIndex({ rssd: 1 });
+```
+
+Then add this as a flag to `fdic_institutions_06_2019` and `ncua_institutions_06_2019` with the following aggregations:
+
+```javascript
+db.fdic_institutions_06_2019.aggregate([
+  {
+    $lookup: {
+      from: 'all_cdfis',
+      localField: 'rssd',
+      foreignField: 'rssd',
+      as: 'cdfi_record'
+    }
+  },
+  {
+    $unwind: '$cdfi_record'
+  },
+  {
+    $addFields: {
+      'flags.cdfi': {
+        $cond: {
+          if: {
+            $eq: ['$cdfi_record.CDFI', 'TRUE']
+          },
+          then: true,
+          else: false
+        }
+      }
+    }
+  },
+  {
+    $project: {
+      cdfi_record: 0
+    }
+  },
+  {
+    $out: 'fdic_institutions_06_2019'
+  }
+]);
+
+db.ncua_institutions_06_2019.aggregate([
+  {
+    $lookup: {
+      from: 'all_cdfis',
+      localField: 'rssd',
+      foreignField: 'rssd',
+      as: 'cdfi_record'
+    }
+  },
+  {
+    $unwind: '$cdfi_record'
+  },
+  {
+    $addFields: {
+      'flags.cdfi': {
+        $cond: {
+          if: {
+            $eq: ['$cdfi_record.CDFI', 'TRUE']
+          },
+          then: true,
+          else: false
+        }
+      }
+    }
+  },
+  {
+    $project: {
+      cdfi_record: 0
+    }
+  },
+  {
+    $out: 'ncua_institutions_06_2019'
+  }
+]);
+```
+
+#### Combine FDIC & NCUA SPM_BASE INTO ALL INSTITUTIONS
+
+Run the following commands in the mongo terminal:
+
+```javascript
+// save each fdic record into all_institutions
+db.fdic_institutions_06_2019.find().forEach(x => {
+  db.all_institutions_06_2019.save(x);
+});
+
+// save each ncua record into all_institutions
+db.ncua_institutions_06_2019.find().forEach(x => {
+  db.all_institutions_06_2019.save(x);
+});
+```
+
+#### Add score data
+
+Run this aggregation on all institutions to add social performance metrics and scores:
+
+```javascript
+db.all_institutions_06_2019.aggregate([
+  {
+    $addFields: {
+      'branchStatistics.pctQctBranches': {
+        $divide: ['$branchStatistics.countQct', '$branchStatistics.countTotal']
+      },
+      'branchStatistics.avgDistToCenterMiles': {
+        $multiply: ['$branchStatistics.avgDistToCenter', 0.000621371]
+      },
+      weights: {
+        qualityLending: 0.6,
+        qctPresence: 0.2,
+        branchDensity: 0.1,
+        totalAssets: 0.1
+      }
+    }
+  },
+  {
+    $addFields: {
+      scores: {
+        qualityLending: {
+          $divide: [
+            {
+              $sum: [
+                '$coreStatistics.housingLending',
+                '$coreStatistics.smallBizLending',
+                '$coreStatistics.farmLending'
+              ]
+            },
+            '$coreStatistics.totalAssetsThousands'
+          ]
+        },
+        qctPresence: '$branchStatistics.pctQctBranches',
+        branchDensity: {
+          $max: [
+            {
+              $divide: [
+                {
+                  $subtract: [250, '$branchStatistics.avgDistToCenterMiles']
+                },
+                250
+              ]
+            },
+            0
+          ]
+        },
+        totalAssets: {
+          $divide: [
+            1,
+            {
+              $add: [
+                1,
+                {
+                  $divide: [
+                    {
+                      $pow: ['$coreStatistics.totalAssetsBillions', 2]
+                    },
+                    25
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    $addFields: {
+      weightedScores: {
+        qualityLending: {
+          $multiply: ['$scores.qualityLending', '$weights.qualityLending']
+        },
+        qctPresence: {
+          $multiply: ['$scores.qctPresence', '$weights.qctPresence']
+        },
+        branchDensity: {
+          $multiply: ['$scores.branchDensity', '$weights.branchDensity']
+        },
+        totalAssets: {
+          $multiply: ['$scores.totalAssets', '$weights.totalAssets']
+        }
+      }
+    }
+  },
+  {
+    $addFields: {
+      totalScores: {
+        raw: {
+          $sum: [
+            '$scores.qualityLending',
+            '$scores.qctPresence',
+            '$scores.branchDensity',
+            '$scores.totalAssets'
+          ]
+        },
+        weighted: {
+          $sum: [
+            '$weightedScores.qualityLending',
+            '$weightedScores.qctPresence',
+            '$weightedScores.branchDensity',
+            '$weightedScores.totalAssets'
+          ]
+        }
+      }
+    }
+  },
+  {
+    $out: 'all_institutions_spm_06_2019'
+  }
+]);
+```
+
+And create an index on rssd:
+
+```javascript
+db.all_institutions_spm_06_2019.createIndex({rssd: 1})
+```
+
+#### STATUS
+
+There should now be a main institution collection called `all_institutions_spm_06_2019`. For FDIC institutions, flags include MDI, Community Bank, and CDFI. For NCUA institutions, flags include MemberMinorityStatus, LowIncome, and CDFI.
+
+### Combining Branches into All_Branches Collection
+
+#### Convert FDIC & NCUA Branches into identical structure
+
+We will be creating new collections ncua & fdic \_spm_base_06_2019 and mapping data to the same fields and turning them into geoJson objects:
+
+```javascript
+db.fdic_branches.aggregate([
+  {
+    $project: {
+      rssd: 1,
+      meta: {
+        uid: {
+          UNINUMBR: '$UNINUMBR'
+        },
+        collection: 'fdic_branches',
+        originId: '$_id',
+        reportDate: '$YEAR'
+      },
+      mainOffice: {
+        $cond: {
+          if: {
+            $eq: ['$BKMO', 1]
+          },
+          then: true,
+          else: false
+        }
+      },
+      bankName: '$NAMEFULL',
+      branchName: '$NAMEBR',
+      address1: '$ADDRESBR',
+      city: '$CITYBR',
+      state: '$STALPBR',
+      stateName: '$STNAMEBR',
+      zip: '$ZIPBR',
+      location: 1,
+      regulator: 1,
+      centroidLocation: 1,
+      distanceToCentroid: 1,
+      distanceToCentroidMiles: {
+        $multiply: ['$distanceToCentroid', 0.000621371]
+      },
+      qct: 1
+    }
+  },
+  {
+    $out: 'fdic_branches_base_06_2019'
+  }
+]);
+
+db.ncua_branches.aggregate([
+  {
+    $project: {
+      rssd: 1,
+      meta: {
+        uid: {
+          rssd: '$rssd',
+          SiteId: '$SiteId'
+        },
+        collection: 'ncua_branches',
+        originId: '$_id',
+        reportDate: '$CYCLE_DATE'
+      },
+      mainOffice: {
+        $cond: {
+          if: {
+            $eq: ['$MainOffice', 'Yes']
+          },
+          then: true,
+          else: false
+        }
+      },
+      bankName: '$CU_NAME',
+      branchName: '$SiteName',
+      address1: '$PhysicalAddressLine1',
+      address2: '$PhysicalAddressLine2',
+      city: '$PhysicalAddressCity',
+      state: '$PhysicalAddressStateCode',
+      zip: '$PhysicalAddressPostalCode',
+      location: 1,
+      regulator: 'ncua',
+      centroidLocation: 1,
+      distanceToCentroid: 1,
+      distanceToCentroidMiles: {
+        $multiply: ['$distanceToCentroid', 0.000621371]
+      },
+      qct: 1
+    }
+  },
+  {
+    $out: 'ncua_branches_base_06_2019'
+  }
+]);
+```
+
+Then combine them:
+
+```javascript
+db.fdic_branches_base_06_2019.find().forEach(x => {
+  db.all_branches_06_2019.save(x);
+});
+
+db.ncua_branches_base_06_2019.find().forEach(x => {
+  db.all_branches_06_2019.save(x);
+});
+```
+
+Add indexes on rssd and location.
+
+```javascript
+db.all_branches_06_2019.createIndex({ rssd: 1 });
+db.all_branches_06_2019.createIndex({ location: '2dsphere' });
+```
+
+### Add Zip Code Data to New DB
+
+```javascript
+const otherDb = db.getSiblingDB('bb');
+otherDb.zips.find().forEach(x => {
+  db.zips.save(x);
+});
+```
+
+Create index on 'postalCode' and 'location' (2dsphere for location)
